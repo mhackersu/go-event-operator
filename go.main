@@ -1,0 +1,92 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"os"
+
+	"cloud.google.com/go/storage"
+	"context"
+	"io/ioutil"
+)
+
+type InputData struct {
+	Values []float64 `json:"values"`
+}
+
+type OutputData struct {
+	StandardDeviation float64 `json:"standard_deviation"`
+}
+
+func fetchDataFromGCP(bucketName, objectName string) ([]byte, error) {
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	bucket := client.Bucket(bucketName)
+	obj := bucket.Object(objectName)
+	r, err := obj.NewReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	data, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func calculateStandardDeviation(values []float64) float64 {
+	n := float64(len(values))
+	if n == 0 {
+		return 0
+	}
+
+	mean := 0.0
+	for _, v := range values {
+		mean += v
+	}
+	mean /= n
+
+	variance := 0.0
+	for _, v := range values {
+		variance += math.Pow(v-mean, 2)
+	}
+	variance /= n
+
+	return math.Sqrt(variance)
+}
+
+func main() {
+	bucketName := os.Getenv("GCP_BUCKET")
+	objectName := os.Getenv("GCP_OBJECT")
+
+	data, err := fetchDataFromGCP(bucketName, objectName)
+	if err != nil {
+		log.Fatalf("Failed to fetch data: %v", err)
+	}
+
+	var input InputData
+	err = json.Unmarshal(data, &input)
+	if err != nil {
+		log.Fatalf("Failed to parse JSON: %v", err)
+	}
+
+	stdDev := calculateStandardDeviation(input.Values)
+	output := OutputData{StandardDeviation: stdDev}
+
+	outputJSON, err := json.Marshal(output)
+	if err != nil {
+		log.Fatalf("Failed to generate JSON output: %v", err)
+	}
+
+	fmt.Println(string(outputJSON))
+}
