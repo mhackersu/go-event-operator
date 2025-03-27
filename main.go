@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"cloud.google.com/go/storage"
+	"cloud.google.com/go/pubsub"
 )
 
 type InputData struct {
@@ -20,26 +20,35 @@ type CalculationResult struct {
 	Result float64 `json:"result"`
 }
 
-func fetchDataFromGCP(ctx context.Context, bucketName, objectName string) ([]byte, error) {
-	client, err := storage.NewClient(ctx)
+func fetchDataFromPubSub(ctx context.Context, projectID, subscriptionID string) ([]InputData, error) {
+	client, err := pubsub.NewClient(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer client.Close()
 
-	reader, err := client.Bucket(bucketName).Object(objectName).NewReader(ctx)
+	sub := client.Subscription(subscriptionID)
+	var inputData []InputData
+
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	err = sub.Receive(cctx, func(ctx context.Context, msg *pubsub.Message) {
+		var data InputData
+		if err := json.Unmarshal(msg.Data, &data); err != nil {
+			log.Printf("Failed to parse message: %v", err)
+			msg.Nack()
+			return
+		}
+		inputData = append(inputData, data)
+		msg.Ack()
+	})
+
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
 
-	data := make([]byte, reader.Attrs.Size)
-	_, err = reader.Read(data)
-	if err != nil {
-		return nil, err
-	}
-
-	return data, nil
+	return inputData, nil
 }
 
 func performCalculations(data []InputData) []CalculationResult {
@@ -53,24 +62,45 @@ func performCalculations(data []InputData) []CalculationResult {
 	return results
 }
 
+func publishResultsToPubSub(ctx context.Context, projectID, topicID string, results []CalculationResult) error {
+	client, err := pubsub.NewClient(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	topic := client.Topic(topicID)
+	for _, result := range results {
+		jsonData, _ := json.Marshal(result)
+		res := topic.Publish(ctx, &pubsub.Message{Data: jsonData})
+		_, err := res.Get(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func main() {
 	ctx := context.Background()
-	bucket := os.Getenv("GCP_BUCKET")
-	object := os.Getenv("GCP_OBJECT")
+	projectID := os.Getenv("GCP_PROJECT")
+	subscriptionID := os.Getenv("GCP_SUBSCRIPTION")
+	topicID := os.Getenv("GCP_TOPIC")
 
-	data, err := fetchDataFromGCP(ctx, bucket, object)
+	inputs, err := fetchDataFromPubSub(ctx, projectID, subscriptionID)
 	if err != nil {
 		log.Fatalf("Failed to fetch data: %v", err)
 	}
 
-	var inputs []InputData
-	if err := json.Unmarshal(data, &inputs); err != nil {
-		log.Fatalf("Failed to parse input data: %v", err)
+	results := performCalculations(inputs)
+	if err := publishResultsToPubSub(ctx, projectID, topicID, results); err != nil {
+		log.Fatalf("Failed to publish results: %v", err)
 	}
 
-	results := performCalculations(inputs)
-	for _, result := range results {
-		jsonData, _ := json.Marshal(result)
-		fmt.Println(string(jsonData))
+	if os.Getenv("PRINT_JSONL") == "true" {
+		for _, result := range results {
+			jsonData, _ := json.Marshal(result)
+			fmt.Println(string(jsonData))
+		}
 	}
 }
