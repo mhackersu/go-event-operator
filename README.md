@@ -1,4 +1,4 @@
-# Go Feeder
+# Go Event Operator
 
                 A Go service via Dockerfile that fetches data specifically from GCP Pub/Sub,
                 performs financial calculations, and updates results in the Pub/Sub message bus.
